@@ -1,0 +1,143 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.email == 'somyeong.1024@gmail.com';
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function postPath(postId) {
+      return /databases/$(database)/documents/posts/$(postId);
+    }
+
+    function statsPath(postId) {
+      return /databases/$(database)/documents/postStats/$(postId);
+    }
+
+    function likePath(likeId) {
+      return /databases/$(database)/documents/likes/$(likeId);
+    }
+
+    match /settings/{settingId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin()
+        && settingId == 'global'
+        && request.resource.data.keys().hasOnly(['defaultLikeLimit'])
+        && request.resource.data.defaultLikeLimit is int
+        && request.resource.data.defaultLikeLimit >= 0
+        && request.resource.data.defaultLikeLimit <= 1000;
+      allow delete: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['email', 'displayName', 'likeLimit', 'likesGiven', 'lastLikeId', 'createdAt'])
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.displayName.size() <= 100
+        && request.resource.data.likesGiven == 0
+        && request.resource.data.lastLikeId == ''
+        && request.resource.data.createdAt == request.time
+        && (
+          (!exists(/databases/$(database)/documents/settings/global) && request.resource.data.likeLimit == 10)
+          || (exists(/databases/$(database)/documents/settings/global)
+            && request.resource.data.likeLimit == get(/databases/$(database)/documents/settings/global).data.defaultLikeLimit)
+        );
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeLimit'])
+        && request.resource.data.likeLimit is int
+        && request.resource.data.likeLimit >= 0
+        && request.resource.data.likeLimit <= 1000
+        || signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesGiven', 'lastLikeId'])
+        && request.resource.data.likeLimit == resource.data.likeLimit
+        && request.resource.data.lastLikeId is string
+        && (
+          request.resource.data.likesGiven == resource.data.likesGiven + 1
+          && request.resource.data.likesGiven <= resource.data.likeLimit
+          && !exists(likePath(request.resource.data.lastLikeId))
+          && existsAfter(likePath(request.resource.data.lastLikeId))
+          || request.resource.data.likesGiven == resource.data.likesGiven - 1
+          && request.resource.data.likesGiven >= 0
+          && exists(likePath(request.resource.data.lastLikeId))
+          && !existsAfter(likePath(request.resource.data.lastLikeId))
+        );
+      allow delete: if false;
+    }
+
+    match /posts/{postId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['ownerId', 'authorName', 'description', 'imageData', 'createdAt'])
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.authorName == get(userPath(request.auth.uid)).data.displayName
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.description.size() <= 1000
+        && request.resource.data.imageData is string
+        && request.resource.data.imageData.matches('data:image/(jpeg|png|webp);base64,.*')
+        && request.resource.data.imageData.size() <= 900000
+        && request.resource.data.createdAt == request.time
+        && getAfter(statsPath(postId)).data.ownerId == request.auth.uid
+        && getAfter(statsPath(postId)).data.likeCount == 0;
+      allow delete: if signedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow update: if false;
+    }
+
+    match /postStats/{postId} {
+      allow read: if signedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['ownerId', 'likeCount', 'lastLikeId'])
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.likeCount == 0
+        && request.resource.data.lastLikeId == ''
+        && getAfter(postPath(postId)).data.ownerId == request.auth.uid;
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likeCount', 'lastLikeId'])
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.lastLikeId is string
+        && (
+          request.resource.data.likeCount == resource.data.likeCount + 1
+          && !exists(likePath(request.resource.data.lastLikeId))
+          && existsAfter(likePath(request.resource.data.lastLikeId))
+          || request.resource.data.likeCount == resource.data.likeCount - 1
+          && request.resource.data.likeCount >= 0
+          && exists(likePath(request.resource.data.lastLikeId))
+          && !existsAfter(likePath(request.resource.data.lastLikeId))
+        );
+      allow delete: if signedIn() && get(postPath(postId)).data.ownerId == request.auth.uid || isAdmin();
+    }
+
+    match /likes/{likeId} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['postId', 'userId', 'ownerId', 'createdAt'])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.ownerId == get(postPath(request.resource.data.postId)).data.ownerId
+        && request.resource.data.ownerId != request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && getAfter(userPath(request.auth.uid)).data.likesGiven == get(userPath(request.auth.uid)).data.likesGiven + 1
+        && getAfter(userPath(request.auth.uid)).data.lastLikeId == likeId
+        && getAfter(statsPath(request.resource.data.postId)).data.likeCount == get(statsPath(request.resource.data.postId)).data.likeCount + 1
+        && getAfter(statsPath(request.resource.data.postId)).data.lastLikeId == likeId;
+      allow delete: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && getAfter(userPath(request.auth.uid)).data.likesGiven == get(userPath(request.auth.uid)).data.likesGiven - 1
+        && getAfter(userPath(request.auth.uid)).data.lastLikeId == likeId
+        && getAfter(statsPath(resource.data.postId)).data.likeCount == get(statsPath(resource.data.postId)).data.likeCount - 1
+        && getAfter(statsPath(resource.data.postId)).data.lastLikeId == likeId;
+      allow update: if false;
+    }
+  }
+}

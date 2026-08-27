@@ -40,3 +40,5 @@ yarn-error.log*
 /work/
 /.tools/
 /index-original.html
+
+/.firebase/
